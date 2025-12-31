@@ -1,0 +1,702 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Distributed Systems — Hybrid Simulation (Raft Visual + Soft Reset)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- D3.js -->
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root{
+      --bg:#07101a;
+      --panel:#071521;
+      --muted:#8fa9c8;
+      --accent:#3b82f6;
+      --active:#22c55e;
+      --busy:#f59e0b;
+      --failed:#ef4444;
+      --idle:#e6eef8;
+      --leader:#1e40af; /* blue for leader */
+      --glass: rgba(255,255,255,0.03);
+      --glass-2: rgba(255,255,255,0.02);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial;
+    }
+    html,body{ height:100%; margin:0; background:linear-gradient(180deg,var(--bg),#041017); color:#dbeafe; }
+    .container{ padding:14px; box-sizing:border-box; display:flex; flex-direction:column; gap:10px; min-height:100vh;}
+    header{ display:flex; justify-content:space-between; align-items:flex-start; gap:10px;}
+    h1{ margin:0; color:var(--accent); font-size:20px }
+    .subtitle{ color:var(--muted); font-size:13px }
+
+    .main { display:flex; gap:12px; align-items:flex-start; }
+    .sim-pane { flex:1; background:linear-gradient(180deg,var(--panel),#04131a); border-radius:10px; padding:10px; box-shadow:0 8px 30px rgba(0,0,0,0.6); min-height:640px; display:flex; flex-direction:column; gap:8px; }
+    .sim-canvas { flex:1; background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.005)); border-radius:8px; overflow:hidden; position:relative; }
+    .tooltip { position:absolute; pointer-events:none; background:rgba(0,0,0,0.75); color:#fff; padding:6px 8px; border-radius:6px; font-size:12px; display:none; z-index:20; }
+
+    .control-pane { width:420px; background:linear-gradient(180deg,var(--panel),#04131a); border-radius:10px; padding:12px; box-shadow:0 8px 30px rgba(0,0,0,0.6); display:flex; flex-direction:column; gap:10px; height:640px; box-sizing:border-box; }
+    .panel-title{ display:flex; justify-content:space-between; align-items:center; color:#e6eef8; font-weight:600 }
+    .controls{ display:flex; flex-wrap:wrap; gap:8px }
+    button, select, input[type="number"], input[type="range"]{ background:var(--glass); border:1px solid rgba(255,255,255,0.04); color:var(--muted); padding:8px 10px; border-radius:8px; cursor:pointer; font-size:13px }
+    .btn-primary{ background:linear-gradient(90deg,var(--accent),#60a5fa); color:#041124; border:none; font-weight:600 }
+    .btn-warn{ background:linear-gradient(90deg,#f97316,#fca311); color:#041016; border:none; font-weight:600 }
+
+    .metrics{ display:flex; gap:8px; }
+    .metric{ flex:1; background:var(--glass-2); border-radius:8px; padding:8px; min-height:58px }
+    .metric h4{ margin:0; color:var(--muted); font-size:13px } .metric p{ margin:6px 0 0; font-size:18px; color:#fff; font-weight:700 }
+
+    .log{ background:transparent; border:1px dashed rgba(255,255,255,0.03); padding:8px; border-radius:8px; max-height:180px; overflow:auto; font-size:12px; color:var(--muted) }
+
+    @media (max-width:980px){ .main{ flex-direction:column } .control-pane{ width:100%; height:auto } .sim-pane{ min-height:420px } }
+
+    .legend { display:flex; gap:8px; align-items:center; color:var(--muted); font-size:12px }
+    .dot{ width:12px; height:12px; border-radius:50%; display:inline-block; margin-right:6px }
+
+    .leader-glow { filter: drop-shadow(0 0 8px rgba(30,64,175,0.6)); }
+    .vote-line { stroke: rgba(96,165,250,0.9); stroke-width:2.2; stroke-dasharray:4 2; opacity:0.95; }
+    .commit-line { stroke: rgba(34,197,94,0.9); stroke-width:2.2; opacity:0.95; }
+
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>Distributed Systems — Hybrid Simulation</h1>
+        <div class="subtitle">Simplified Raft visualization + Soft Reset • D3.js + Chart.js</div>
+      </div>
+      <div style="text-align:right;">
+        <div style="color:var(--muted); font-size:13px;">Dark theme • Open with Live Server in VS Code</div>
+      </div>
+    </header>
+
+    <div class="main">
+      <div class="sim-pane">
+        <div class="panel-title"><div>Simulation Area</div><div style="color:var(--muted); font-size:12px">Drag nodes • dbl-click node to fail/recover</div></div>
+        <div id="simCanvas" class="sim-canvas">
+          <div id="tooltip" class="tooltip"></div>
+        </div>
+
+        <div style="display:flex; gap:12px; align-items:center">
+          <div style="flex:1"><canvas id="throughputChart" style="height:80px; width:100%"></canvas></div>
+          <div style="width:220px; color:var(--muted); font-size:13px; text-align:right;">
+            <div>Tasks Completed: <span id="totalCompleted">0</span></div>
+            <div>Active Nodes: <span id="activeCount">0</span></div>
+            <div>Queue Length: <span id="queueLen">0</span></div>
+          </div>
+        </div>
+      </div>
+
+      <aside class="control-pane">
+        <div class="panel-title"><div>Controls</div><div style="font-size:12px;color:var(--muted)">Interactive</div></div>
+
+        <div class="controls">
+          <button id="addNodeBtn">Add Node</button>
+          <button id="removeNodeBtn">Remove Node</button>
+          <button id="distributeBtn" class="btn-primary">Distribute Tasks</button>
+          <button id="autoToggleBtn">Start Auto Mode</button>
+          <button id="simulateFailBtn" class="btn-warn">Simulate Failure</button>
+        </div>
+
+        <div style="display:flex; gap:8px; align-items:center;">
+          <select id="archSelect" title="Architecture">
+            <option value="client-server">Client–Server</option>
+            <option value="p2p">Peer-to-Peer (P2P)</option>
+            <option value="cluster">Cluster</option>
+            <option value="grid">Grid</option>
+            <option value="cloud">Cloud</option>
+          </select>
+          <button id="replicateBtn">Replicate</button>
+          <button id="consensusBtn">Consensus Demo</button>
+          <button id="resetBtn">Reset Simulation</button>
+        </div>
+
+        <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
+          <label style="color:var(--muted)">#Tasks</label>
+          <input id="taskCount" type="number" min="1" max="500" value="20" style="width:70px">
+          <label style="color:var(--muted)">Latency (ms)</label>
+          <input id="netLatency" type="number" min="0" max="4000" value="200" style="width:70px">
+        </div>
+
+        <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
+          <label style="color:var(--muted)">Drop%</label>
+          <input id="dropProb" type="number" min="0" max="80" value="5" style="width:70px">
+          <label style="color:var(--muted)">Failure%</label>
+          <input id="autoFailProb" type="number" min="0" max="50" value="2" style="width:70px">
+        </div>
+
+        <div style="margin-top:10px;">
+          <div class="panel-title">Metrics</div>
+          <div class="metrics" style="margin-top:8px;">
+            <div class="metric"><h4>Avg Utilization</h4><p id="avgUtil">0%</p></div>
+            <div class="metric"><h4>Throughput</h4><p id="throughput">0 t/s</p></div>
+          </div>
+        </div>
+
+        <div style="margin-top:8px"><div class="panel-title">Event Log</div><div class="log" id="logPanel" aria-live="polite"></div></div>
+
+        <div style="margin-top:8px">
+          <div class="panel-title">Legend</div>
+          <div style="display:flex;flex-direction:column;gap:6px;margin-top:8px">
+            <div class="legend"><span class="dot" style="background:var(--active)"></span>Active</div>
+            <div class="legend"><span class="dot" style="background:var(--busy)"></span>Busy</div>
+            <div class="legend"><span class="dot" style="background:var(--idle)"></span>Idle</div>
+            <div class="legend"><span class="dot" style="background:var(--failed)"></span>Failed</div>
+            <div class="legend"><span class="dot" style="background:var(--leader)"></span>Leader (consensus)</div>
+          </div>
+        </div>
+
+        <div style="margin-top:auto; color:var(--muted); font-size:12px">
+          <div style="margin-bottom:6px">Tip: double-click a node to fail/recover it. Drag nodes to reorganize topology.</div>
+          <div style="display:flex;justify-content:space-between"><div>Ernest • Demo</div><div id="version">v1.2</div></div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+<script>
+/* --------------------------
+   HYBRID SIMULATION ENGINE
+   - simplified Raft visualization (arrows + highlights)
+   - soft Reset (preserve UI settings)
+   -------------------------- */
+
+const simCanvas = d3.select('#simCanvas');
+const width = Math.max(760, window.innerWidth * 0.6);
+const height = 520;
+const svg = simCanvas.append('svg').attr('width','100%').attr('height',height).style('display','block');
+const linkG = svg.append('g');
+const messageG = svg.append('g'); // for ephemeral message arrows
+const nodeG = svg.append('g');
+const tooltip = d3.select('#tooltip');
+
+let nodes = [];
+let links = [];
+let taskQueue = [];
+let totalCompleted = 0;
+let nextNodeId = 1;
+let architecture = 'client-server';
+let netLatency = +document.getElementById('netLatency').value;
+let dropProb = +document.getElementById('dropProb').value;
+let autoFailProb = +document.getElementById('autoFailProb').value;
+let autoMode = false;
+let metricsHistory = [];
+let lastCompletedSnapshot = 0;
+let consensusInProgress = false;
+
+// Chart setup
+const ctx = document.getElementById('throughputChart').getContext('2d');
+const throughputChart = new Chart(ctx, {
+  type:'line',
+  data:{ labels:[], datasets:[{ label:'Total Completed', data:[], borderColor:'#60a5fa', backgroundColor:'rgba(96,165,250,0.12)', tension:0.35, pointRadius:0 }]},
+  options:{ responsive:true, maintainAspectRatio:false, scales:{ x:{display:false}, y:{ beginAtZero:true, ticks:{ color:'#9fb6dd' } } }, plugins:{legend:{labels:{color:'#9fb6dd'}}}}
+});
+
+// logging
+function log(msg){
+  const panel = document.getElementById('logPanel');
+  const time = new Date().toLocaleTimeString();
+  const entry = document.createElement('div');
+  entry.innerHTML = `<div style="color:#9fb6dd">[${time}]</div><div style="margin-left:6px">${msg}</div>`;
+  panel.prepend(entry);
+  if(panel.childElementCount > 300) panel.removeChild(panel.lastChild);
+}
+
+// node helpers
+function addNode(x,y){
+  const n = { id: nextNodeId++, x: x || (Math.random()*(width-140)+70), y: y || (Math.random()*(height-60)+30), state:'idle', tasks:[], capacity: 1 + Math.floor(Math.random()*2), replication:{}, lastHeartbeat: Date.now() };
+  nodes.push(n);
+  rebuildNetwork();
+  log(`Node ${n.id} added (cap ${n.capacity})`);
+  return n;
+}
+function removeNode(){
+  if(nodes.length===0) return;
+  const n = nodes.pop();
+  if(n.tasks.length) n.tasks.forEach(t=>taskQueue.push(t));
+  rebuildNetwork();
+  log(`Node ${n.id} removed`);
+}
+function getNodeById(id){ return nodes.find(n=>n.id===id) || null; }
+
+// links for architecture
+function buildLinksForArchitecture(){
+  links = [];
+  if(architecture === 'client-server'){
+    if(nodes.length<1) return;
+    const master = nodes[0]; // leader/master
+    nodes.forEach(n => { if(n.id !== master.id) links.push({source:master.id, target:n.id}); });
+  } else if(architecture === 'p2p'){
+    for(let i=0;i<nodes.length;i++) for(let j=i+1;j<nodes.length;j++) links.push({source:nodes[i].id, target:nodes[j].id});
+  } else if(architecture === 'cluster'){
+    if(nodes.length<1) return;
+    const head = nodes[0];
+    for(let i=1;i<nodes.length;i++) links.push({source:head.id, target:nodes[i].id});
+  } else if(architecture === 'grid'){
+    if(nodes.length<2) return;
+    nodes.forEach(a=>{
+      const nearest = nodes.filter(n=>n.id!==a.id).sort((x,y)=>distSq(a,x)-distSq(a,y)).slice(0,3);
+      nearest.forEach(b => links.push({source:a.id, target:b.id}));
+    });
+    links = links.filter((v,i,self)=> i===self.findIndex(t=>(t.source===v.source&&t.target===v.target)||(t.source===v.target&&t.target===v.source)));
+  } else if(architecture === 'cloud'){
+    if(nodes.length<1) return;
+    const masters = nodes.slice(0, Math.min(2,nodes.length));
+    nodes.forEach(n=> masters.forEach(m=>{ if(n.id!==m.id) links.push({source:m.id,target:n.id}) }));
+  }
+}
+
+function distSq(a,b){ return (a.x-b.x)**2 + (a.y-b.y)**2; }
+
+// draw network
+function rebuildNetwork(){
+  buildLinksForArchitecture();
+  const rect = document.getElementById('simCanvas').getBoundingClientRect();
+  svg.attr('height', rect.height);
+
+  // links
+  const linkSel = linkG.selectAll('line').data(links, d=>`${d.source}-${d.target}`);
+  linkSel.enter().append('line').attr('stroke','rgba(96,165,250,0.06)').attr('stroke-width',1.2).merge(linkSel)
+    .attr('x1',d => getNodeById(d.source).x).attr('y1',d => getNodeById(d.source).y)
+    .attr('x2',d => getNodeById(d.target).x).attr('y2',d => getNodeById(d.target).y).attr('opacity',0.95);
+  linkSel.exit().remove();
+
+  // nodes
+  const nodeSel = nodeG.selectAll('g.node').data(nodes, d=>d.id);
+  const nodeEnter = nodeSel.enter().append('g').attr('class','node').call(d3.drag().on('start',dragstarted).on('drag',dragged).on('end',dragended));
+  nodeEnter.append('circle').attr('r',22).attr('stroke','rgba(255,255,255,0.06)').attr('stroke-width',2).attr('fill',d=>stateColor(d.state));
+  nodeEnter.append('text').attr('dy',6).attr('text-anchor','middle').attr('fill','#071124').attr('font-size',11).text(d=>`N${d.id}`);
+  nodeEnter.append('circle').attr('class','progress').attr('r',0).attr('fill','rgba(255,255,255,0.06)').attr('opacity',0.2);
+
+  nodeSel.merge(nodeEnter).attr('transform', d=>`translate(${d.x},${d.y})`).each(function(d){
+    const g = d3.select(this);
+    g.select('circle').transition().duration(200).attr('fill', stateColor(d.state)).attr('r', 20 + (d.state==='busy'?4:0));
+    g.select('text').text(`N${d.id}`);
+    const pr = g.select('circle.progress');
+    const pct = Math.min(1, (d.tasks.length / (d.capacity||1)));
+    pr.transition().duration(300).attr('r', 6 + pct*10).attr('opacity', d.tasks.length?0.22:0.06);
+    // leader glow
+    if(d.isLeader) g.select('circle').classed('leader-glow', true); else g.select('circle').classed('leader-glow', false);
+  });
+
+  nodeG.selectAll('g.node')
+    .on('mouseenter', function(event,d){
+      const html = `<b>Node ${d.id}</b><br/>State: ${d.state.toUpperCase()}<br/>Tasks: ${d.tasks.length}<br/>Cap: ${d.capacity}`;
+      tooltip.style('display','block').html(html);
+    })
+    .on('mousemove', function(event){
+      const rect = document.getElementById('simCanvas').getBoundingClientRect();
+      tooltip.style('left', (event.pageX - rect.left) + 'px').style('top', (event.pageY - rect.top - 20) + 'px');
+    })
+    .on('mouseleave', ()=> tooltip.style('display','none'))
+    .on('dblclick', function(event,d){
+      if(d.state === 'failed'){ d.state='idle'; log(`Node ${d.id} recovered (dblclick)`); }
+      else{ d.state='failed'; if(d.tasks.length){ d.tasks.forEach(t=>taskQueue.push(t)); d.tasks=[]; log(`Node ${d.id} failed; tasks requeued`); } else log(`Node ${d.id} failed (dblclick)`); }
+      // clear leader flags if necessary
+      nodes.forEach(n=> n.isLeader = false);
+      rebuildNetwork();
+    });
+
+  nodeSel.exit().remove();
+  updateSummary();
+}
+
+// colors
+function stateColor(s){
+  if(s==='leader') return 'rgba(30,64,175,0.95)'; // leader blue
+  if(s==='active') return 'rgba(34,197,94,0.92)';
+  if(s==='busy') return 'rgba(245,158,11,0.95)';
+  if(s==='failed') return 'rgba(239,68,68,0.95)';
+  return 'rgba(230,238,248,0.95)';
+}
+
+// drag handlers
+function dragstarted(event,d){ d3.select(this).raise().classed('active',true); }
+function dragged(event,d){ d.x = Math.max(40, Math.min(event.x, document.getElementById('simCanvas').clientWidth - 40)); d.y = Math.max(30, Math.min(event.y, height - 30)); d3.select(this).attr('transform', `translate(${d.x},${d.y})`); rebuildNetwork(); }
+function dragended(event,d){ d3.select(this).classed('active',false); }
+
+// tasks
+function createTasks(count){
+  for(let i=0;i<count;i++){
+    taskQueue.push({ id:`T${Date.now()}-${Math.floor(Math.random()*10000)}`, complexity: 0.5 + Math.random()*3 });
+  }
+  updateQueueUI();
+  log(`${count} tasks generated`);
+}
+
+// distribution logic (same hybrid)
+function distributeTasks(){
+  if(taskQueue.length===0){ log('No tasks to distribute'); return; }
+  if(nodes.length===0){ log('No nodes available'); return; }
+
+  if(architecture==='client-server' || architecture==='cluster' || architecture==='cloud'){
+    const leaders = getLeaders();
+    if(leaders.length===0){ log('No leader available to distribute tasks'); return; }
+    for(let i=0;i<Math.min(taskQueue.length, nodes.length*4); i++){
+      const t = taskQueue.shift();
+      assignTaskFromLeader(t, leaders);
+    }
+  } else {
+    while(taskQueue.length>0){
+      const candidate = selectLeastLoadedNode();
+      if(!candidate) break;
+      const t = taskQueue.shift();
+      assignToNode(candidate, t);
+    }
+  }
+  updateQueueUI();
+}
+
+function getLeaders(){
+  if(nodes.length===0) return [];
+  if(architecture==='cloud'){
+    return nodes.slice(0, Math.min(2, nodes.length)).filter(n=> n.state!=='failed');
+  }
+  if(architecture==='client-server' || architecture==='cluster'){
+    const head = nodes[0];
+    return head && head.state!=='failed' ? [head] : [];
+  }
+  return [];
+}
+
+function assignTaskFromLeader(task, leaders){
+  let candidates = nodes.filter(n=> n.state!=='failed');
+  if(leaders && leaders.length>0) candidates = candidates.filter(n=> !leaders.some(l=>l.id===n.id));
+  candidates = candidates.filter(n => n.tasks.length < n.capacity);
+  candidates.sort((a,b)=> a.tasks.length - b.tasks.length);
+  if(candidates.length===0){ taskQueue.push(task); return; }
+  assignToNode(candidates[0], task);
+}
+
+function selectLeastLoadedNode(){
+  const cands = nodes.filter(n=>n.state!=='failed' && n.tasks.length < n.capacity);
+  if(cands.length===0) return null;
+  cands.sort((a,b)=> a.tasks.length - b.tasks.length);
+  return cands[0];
+}
+
+function assignToNode(node, task){
+  if(!node || node.state==='failed'){ taskQueue.push(task); return; }
+  node.tasks.push(task);
+  node.state = node.tasks.length >= node.capacity ? 'busy' : 'active';
+  animateMessage(null, node.id);
+  log(`Assigned ${task.id} -> N${node.id}`);
+  simulateProcessing(node, task);
+  rebuildNetwork();
+  updateQueueUI();
+}
+
+function simulateProcessing(node, task){
+  const base = 700 + Math.random()*900;
+  const processTime = base * (task.complexity||1) + netLatency;
+  node.state = node.tasks.length>=node.capacity ? 'busy' : 'active';
+  rebuildNetwork();
+
+  setTimeout(()=>{
+    if(Math.random()*100 < dropProb){
+      node.tasks = node.tasks.filter(t=>t.id!==task.id);
+      taskQueue.push(task);
+      log(`Result message from N${node.id} for ${task.id} lost (drop). Task requeued.`);
+      node.state = node.tasks.length>0 ? (node.tasks.length>=node.capacity?'busy':'active') : 'idle';
+      rebuildNetwork(); updateQueueUI();
+      return;
+    }
+    if(node.state === 'failed'){
+      node.tasks = node.tasks.filter(t=>t.id!==task.id);
+      taskQueue.push(task);
+      log(`N${node.id} failed while processing ${task.id}. Requeued.`);
+      rebuildNetwork(); updateQueueUI();
+      return;
+    }
+    node.tasks = node.tasks.filter(t=>t.id!==task.id);
+    totalCompleted++;
+    document.getElementById('totalCompleted').innerText = totalCompleted;
+    log(`N${node.id} completed ${task.id}`);
+    if(Math.random() < 0.28) replicateToNeighbors(node, task);
+    node.state = node.tasks.length>0 ? (node.tasks.length>=node.capacity?'busy':'active') : 'idle';
+    rebuildNetwork();
+    recordMetric();
+    if(taskQueue.length>0){ const t2 = taskQueue.shift(); assignToNode(selectLeastLoadedNode(), t2); }
+  }, Math.max(200, processTime));
+}
+
+// animate message (fromId null = center)
+function animateMessage(fromId, toId, styleClass='') {
+  let sx, sy, tx, ty;
+  if(fromId === null){
+    sx = document.getElementById('simCanvas').clientWidth/2;
+    sy = height/2;
+  } else {
+    const s = getNodeById(fromId); if(!s) return; sx = s.x; sy = s.y;
+  }
+  const t = getNodeById(toId); if(!t) return; tx = t.x; ty = t.y;
+  const line = messageG.append('line')
+    .attr('x1', sx).attr('y1', sy).attr('x2', sx).attr('y2', sy)
+    .attr('stroke', 'rgba(96,165,250,0.9)').attr('stroke-width',2).attr('class', styleClass);
+  line.transition().duration(600 + Math.random()*400).attr('x2', tx).attr('y2', ty).on('end', ()=> line.remove());
+}
+
+// replication
+function replicateToNeighbors(node, task){
+  const neigh = nodes.filter(n=> n.id!==node.id && n.state!=='failed').sort((a,b)=>distSq(a,node)-distSq(b,node)).slice(0,2);
+  neigh.forEach(n=> { n.replication = n.replication || {}; n.replication[task.id] = 'replicating'; animateMessage(node.id, n.id, 'commit-line'); });
+  log(`N${node.id} replicating ${task.id} -> ${neigh.map(x=>'N'+x.id).join(',')}`);
+  setTimeout(()=>{
+    neigh.forEach(n => {
+      if(Math.random()*100 < dropProb){ n.replication[task.id] = 'failed'; log(`Replication to N${n.id} lost`); }
+      else { n.replication[task.id] = 'ok'; }
+    });
+    const oks = neigh.filter(n=>n.replication[task.id]==='ok').length;
+    if(oks >= Math.ceil((neigh.length)/2)) log(`Replication of ${task.id} majority OK.`);
+    else log(`Replication of ${task.id} failed to reach majority.`);
+  }, 500 + netLatency);
+}
+
+// simplified raft-style consensus visualization (conceptual)
+function runSimplifiedConsensus() {
+  if(consensusInProgress) { log('Consensus already running'); return; }
+  if(nodes.length < 3) { log('Add at least 3 nodes for meaningful consensus demo'); return; }
+  consensusInProgress = true;
+  // clear previous leader flags
+  nodes.forEach(n=>{ n.isLeader=false; n.state = n.state==='failed' ? 'failed' : 'idle'; });
+  rebuildNetwork();
+
+  // pick a candidate (random alive node)
+  const candidates = nodes.filter(n=> n.state !== 'failed');
+  const candidate = candidates[Math.floor(Math.random()*candidates.length)];
+  if(!candidate) { consensusInProgress=false; return; }
+  log(`Node ${candidate.id} becomes candidate and requests votes...`);
+  // draw vote arrows to others (blue dashed)
+  const voters = nodes.filter(n=> n.id !== candidate.id && n.state !== 'failed');
+  const voteLines = [];
+  voters.forEach((v, idx)=>{
+    const line = messageG.append('line').attr('class','vote-line').attr('x1', candidate.x).attr('y1', candidate.y).attr('x2', candidate.x).attr('y2', candidate.y);
+    line.transition().duration(400 + idx*120).attr('x2', v.x).attr('y2', v.y);
+    voteLines.push(line);
+  });
+  // after vote messages, show ACKs (simulate some random delays/fails)
+  setTimeout(()=>{
+    let acks = 1; // candidate votes for self
+    voters.forEach((v, idx)=>{
+      const ok = Math.random()*100 > (dropProb + 8); // some chance of not voting due to drop
+      if(ok){
+        // draw ack arrow back (green)
+        const ack = messageG.append('line').attr('class','commit-line').attr('x1', v.x).attr('y1', v.y).attr('x2', v.x).attr('y2', v.y);
+        ack.transition().duration(500 + idx*150).attr('x2', candidate.x).attr('y2', candidate.y).on('end', ()=> ack.remove());
+        acks++;
+        // flash follower green
+        flashNode(v.id, 'ok');
+      } else {
+        log(`N${v.id} did not vote (simulated)`);
+      }
+    });
+    // remove vote lines
+    voteLines.forEach(l => l.remove());
+    const majority = Math.ceil((nodes.filter(n=> n.state !== 'failed').length)/2);
+    setTimeout(()=>{
+      if(acks >= majority){
+        // candidate wins
+        candidate.isLeader = true;
+        candidate.state = 'leader';
+        rebuildNetwork();
+        log(`Node ${candidate.id} elected leader (acks=${acks}/${nodes.length})`);
+        // leader broadcast commit (short green arrows to all)
+        const followers = nodes.filter(n=> n.id !== candidate.id && n.state !== 'failed');
+        followers.forEach((f, idx)=>{
+          const c = messageG.append('line').attr('class','commit-line').attr('x1', candidate.x).attr('y1', candidate.y).attr('x2', candidate.x).attr('y2', candidate.y);
+          c.transition().duration(400 + idx*120).attr('x2', f.x).attr('y2', f.y).on('end', ()=> c.remove());
+        });
+        setTimeout(()=>{ log('Leader broadcast committed entry to followers (visual)'); consensusInProgress = false; }, 900);
+      } else {
+        log(`Candidate ${candidate.id} failed to achieve majority (acks=${acks}).`);
+        consensusInProgress = false;
+      }
+    }, 600);
+  }, 700);
+}
+
+// flash node (brief color flash)
+function flashNode(nodeId, type){
+  const g = nodeG.selectAll('g.node').filter(d=> d.id===nodeId);
+  if(!g.empty()){
+    const circle = g.select('circle');
+    const orig = circle.attr('fill');
+    circle.transition().duration(120).attr('fill','rgba(34,197,94,0.98)').transition().duration(300).attr('fill', stateColor(getNodeById(nodeId).state));
+  }
+}
+
+// failure simulation
+function simulateFailure(){
+  const candidates = nodes.filter(n=> n.state!=='failed');
+  if(candidates.length===0) return;
+  const target = candidates[Math.floor(Math.random()*candidates.length)];
+  target.state = 'failed';
+  if(target.tasks.length){ target.tasks.forEach(t=>taskQueue.push(t)); target.tasks=[]; }
+  log(`N${target.id} simulated failure`);
+  // clear leader flags if necessary
+  if(target.isLeader){ nodes.forEach(n=> n.isLeader = false); }
+  rebuildNetwork();
+  updateQueueUI();
+}
+function recoverNode(){
+  const failed = nodes.find(n=> n.state==='failed');
+  if(!failed){ log('No failed node available'); return; }
+  failed.state = 'idle';
+  log(`N${failed.id} recovered`);
+  rebuildNetwork();
+  assignPendingTasks();
+}
+
+// assign pending tasks
+function assignPendingTasks(){
+  let assigned = 0;
+  for(let i=0;i<taskQueue.length;i++){
+    const candidate = nodes.find(n=> n.state!=='failed' && n.tasks.length < n.capacity);
+    if(candidate){ const t = taskQueue.splice(i,1)[0]; assignToNode(candidate, t); assigned++; i--; }
+  }
+  if(assigned>0) log(`Assigned ${assigned} pending tasks`);
+  updateQueueUI();
+}
+
+// auto mode
+let autoInterval = null;
+function startAutoMode(){
+  autoMode = true;
+  document.getElementById('autoToggleBtn').innerText = 'Stop Auto Mode';
+  autoInterval = setInterval(()=>{
+    const n = Math.max(1, Math.round((Math.random()*8)));
+    createTasks(n);
+    distributeTasks();
+    if(Math.random()*100 < +document.getElementById('autoFailProb').value){
+      simulateFailure();
+    }
+  }, 2200);
+}
+function stopAutoMode(){ autoMode=false; document.getElementById('autoToggleBtn').innerText='Start Auto Mode'; if(autoInterval) clearInterval(autoInterval); }
+
+// assign pending periodically
+setInterval(()=>{ if(taskQueue.length>0) assignPendingTasks(); }, 1200);
+
+// metric recording
+function recordMetric(){
+  const now = new Date().toLocaleTimeString();
+  metricsHistory.push({t:now,c:totalCompleted});
+  if(metricsHistory.length>60) metricsHistory.shift();
+  throughputChart.data.labels = metricsHistory.map(m=>m.t);
+  throughputChart.data.datasets[0].data = metricsHistory.map(m=>m.c);
+  throughputChart.update();
+
+  const throughput = (totalCompleted - lastCompletedSnapshot) / 2; // rough rate
+  lastCompletedSnapshot = totalCompleted;
+  document.getElementById('throughput').innerText = `${Math.round(throughput*10)/10} t/s`;
+  updateSummary();
+}
+
+// update summary
+function updateSummary(){
+  const active = nodes.filter(n=> n.state!=='failed').length;
+  document.getElementById('activeCount').innerText = active;
+  document.getElementById('queueLen').innerText = taskQueue.length;
+  let util=0, cap=0;
+  nodes.forEach(n=>{ cap += n.capacity; util += n.tasks.length; });
+  const avg = cap === 0 ? 0 : Math.round((util/cap)*100);
+  document.getElementById('avgUtil').innerText = avg + '%';
+}
+
+// update queue UI
+function updateQueueUI(){ document.getElementById('queueLen').innerText = taskQueue.length; }
+
+// replicate button (manual)
+function replicateAllFromFirst(){
+  if(nodes.length<1) return;
+  const origin = nodes[0];
+  const fake = { id:`R${Date.now()}`, complexity:0.1 };
+  replicateToNeighbors(origin, fake);
+}
+function runConsensus(){ runSimplifiedConsensus(); }
+
+// UI bindings
+document.getElementById('addNodeBtn').addEventListener('click', ()=> addNode());
+document.getElementById('removeNodeBtn').addEventListener('click', ()=> removeNode());
+document.getElementById('distributeBtn').addEventListener('click', ()=> { createTasks(+document.getElementById('taskCount').value || 10); distributeTasks(); });
+document.getElementById('simulateFailBtn').addEventListener('click', ()=> simulateFailure());
+document.getElementById('archSelect').addEventListener('change', (e)=> { architecture = e.target.value; rebuildNetwork(); log(`Architecture -> ${architecture}`); });
+document.getElementById('netLatency').addEventListener('change', (e)=> { netLatency = +e.target.value; log(`Latency set to ${netLatency}ms`); });
+document.getElementById('dropProb').addEventListener('change', (e)=> { dropProb = +e.target.value; log(`Drop prob ${dropProb}%`); });
+document.getElementById('autoFailProb').addEventListener('change', (e)=> { autoFailProb = +e.target.value; log(`Auto failure prob set ${autoFailProb}%`); });
+document.getElementById('replicateBtn').addEventListener('click', ()=> replicateAllFromFirst());
+document.getElementById('consensusBtn').addEventListener('click', ()=> runConsensus());
+document.getElementById('autoToggleBtn').addEventListener('click', ()=> { if(!autoMode) startAutoMode(); else stopAutoMode(); });
+
+// Reset (soft) - preserves UI settings but clears state
+document.getElementById('resetBtn').addEventListener('click', ()=> {
+  // preserve current UI values
+  const preserved = {
+    arch: document.getElementById('archSelect').value,
+    latency: document.getElementById('netLatency').value,
+    drop: document.getElementById('dropProb').value,
+    fail: document.getElementById('autoFailProb').value,
+    taskCount: document.getElementById('taskCount').value,
+    autoModeState: autoMode
+  };
+  // stop auto mode
+  stopAutoMode();
+  // clear simulation state
+  nodes=[]; links=[]; taskQueue=[]; totalCompleted=0; nextNodeId=1; metricsHistory=[];
+  throughputChart.data.labels=[]; throughputChart.data.datasets[0].data=[]; throughputChart.update();
+  document.getElementById('totalCompleted').innerText = 0;
+  document.getElementById('logPanel').innerHTML = '';
+  // reset UI preserved settings back
+  document.getElementById('archSelect').value = preserved.arch;
+  document.getElementById('netLatency').value = preserved.latency;
+  document.getElementById('dropProb').value = preserved.drop;
+  document.getElementById('autoFailProb').value = preserved.fail;
+  document.getElementById('taskCount').value = preserved.taskCount;
+  architecture = preserved.arch;
+  netLatency = +preserved.latency;
+  dropProb = +preserved.drop;
+  autoFailProb = +preserved.fail;
+  // re-add default nodes
+  for(let i=0;i<4;i++) addNode(width/2 + (i-1.5)*80, height/2 + (i%2===0? -40:40));
+  rebuildNetwork();
+  log('Soft Reset: simulation cleared and default nodes created (UI settings preserved).');
+  // resume auto mode if was on
+  if(preserved.autoModeState) startAutoMode();
+});
+
+// assign pending tasks fairness
+function assignPendingFair(){
+  for(let i=0;i<taskQueue.length;i++){
+    const cand = selectLeastLoadedNode();
+    if(!cand) break;
+    const t = taskQueue.splice(i,1)[0];
+    assignToNode(cand, t);
+    i--;
+  }
+}
+
+// initialize default
+function resetSimulationInitial(){
+  nodes=[]; links=[]; taskQueue=[]; totalCompleted=0; nextNodeId=1; metricsHistory=[];
+  throughputChart.data.labels=[]; throughputChart.data.datasets[0].data=[]; throughputChart.update();
+  document.getElementById('totalCompleted').innerText = 0;
+  document.getElementById('logPanel').innerHTML = '';
+  for(let i=0;i<4;i++) addNode(width/2 + (i-1.5)*80, height/2 + (i%2===0? -40:40));
+  rebuildNetwork();
+  log('Simulation initialized with default nodes.');
+}
+resetSimulationInitial();
+
+// periodic tasks
+setInterval(()=> { if(taskQueue.length>0) assignPendingTasks(); }, 1000);
+setInterval(()=> {
+  if(!autoMode) return;
+  if(Math.random()*100 < +document.getElementById('autoFailProb').value) simulateFailure();
+}, 3000);
+setInterval(()=> { recordMetric(); }, 1500);
+
+log('Hybrid Distributed Systems Simulation (with simplified Raft visualization & soft reset) started.');
+
+</script>
+</body>
+</html>
